@@ -1,0 +1,185 @@
+import Foundation
+import CryptoKit
+import Security
+import AppKit
+
+/// PKCE OAuth 2.0 flow against Google's "Desktop app" client type.
+///
+/// Google disallows custom URI scheme redirects for Desktop-app OAuth clients
+/// (an app claiming an arbitrary scheme could impersonate another app) — see
+/// https://developers.google.com/identity/protocols/oauth2/native-app. The
+/// supported flow instead is: open the system browser, have Google redirect
+/// to a loopback address, and have the app briefly listen there
+/// (OAuthLoopbackServer) to catch the one redirect request and pull the
+/// authorization code out of its query string.
+///
+/// IMPORTANT: this is a template. Copy it to `GmailOAuthManager.swift`
+/// (gitignored — never commit real credentials) and fill in `clientID`/
+/// `clientSecret` from your own Google Cloud OAuth client — see
+/// SETUP-GMAIL.md. Google's Desktop-app client type still requires the
+/// client_secret in the token-exchange request even though PKCE is in use;
+/// Google treats this value as non-confidential for installed apps, so it's
+/// fine to embed here (it is not a server-side secret) — it's still excluded
+/// from git only because it's specific to your own Google Cloud project.
+final class GmailOAuthManager: NSObject, ObservableObject {
+    private let clientID = "YOUR_CLIENT_ID.apps.googleusercontent.com"
+    private let clientSecret = "YOUR_CLIENT_SECRET"
+    private let scopes = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose"
+
+    struct GmailAuthResult {
+        let email: String
+        let accessToken: String
+        let refreshToken: String
+        let expiresAt: Date
+    }
+
+    enum OAuthError: LocalizedError {
+        case browserLaunchFailed
+        case tokenExchangeFailed(String)
+        case profileFetchFailed
+        case notConfigured
+
+        var errorDescription: String? {
+            switch self {
+            case .browserLaunchFailed: return "Couldn't open your browser to sign in."
+            case .tokenExchangeFailed(let msg): return "Token exchange failed: \(msg)"
+            case .profileFetchFailed: return "Could not read the connected Gmail address."
+            case .notConfigured: return "Gmail isn't configured yet — add your Google Cloud OAuth client ID/secret in GmailOAuthManager.swift. See SETUP-GMAIL.md."
+            }
+        }
+    }
+
+    var isConfigured: Bool {
+        !clientID.hasPrefix("YOUR_") && !clientSecret.hasPrefix("YOUR_")
+    }
+
+    func connect() async throws -> GmailAuthResult {
+        guard isConfigured else { throw OAuthError.notConfigured }
+
+        let verifier = Self.randomCodeVerifier()
+        let challenge = Self.codeChallenge(for: verifier)
+
+        let server = try OAuthLoopbackServer.start()
+        let redirectURI = "http://127.0.0.1:\(server.port)/oauth2redirect"
+        let authorizeURL = Self.makeAuthorizeURL(clientID: clientID, redirectURI: redirectURI, scopes: scopes, challenge: challenge)
+
+        // Printed so a failed sign-in is diagnosable at a glance: if this
+        // isn't an http://127.0.0.1:... URL, the running binary predates the
+        // loopback-redirect fix (rebuild). If it is, and sign-in still fails,
+        // the problem is downstream (browser/Google-side or token exchange) —
+        // check the error text surfaced in Settings → Accounts.
+        print("[Mailify] OAuth: opening \(authorizeURL)")
+
+        guard NSWorkspace.shared.open(authorizeURL) else {
+            server.stop()
+            throw OAuthError.browserLaunchFailed
+        }
+
+        let code = try await server.waitForAuthorizationCode()
+        return try await exchangeCodeForTokens(code: code, verifier: verifier, redirectURI: redirectURI)
+    }
+
+    /// Pure URL construction, pulled out of `connect()` so it can be unit
+    /// tested without touching the network, a browser, or a real listener.
+    static func makeAuthorizeURL(clientID: String, redirectURI: String, scopes: String, challenge: String) -> URL {
+        var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "scope", value: scopes),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "access_type", value: "offline"),
+            URLQueryItem(name: "prompt", value: "consent")
+        ]
+        return components.url!
+    }
+
+    private func exchangeCodeForTokens(code: String, verifier: String, redirectURI: String) async throws -> GmailAuthResult {
+        let params = [
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "client_id": clientID,
+            "client_secret": clientSecret,
+            "redirect_uri": redirectURI
+        ]
+        let token = try await postForm(params)
+
+        guard let refreshToken = token.refreshToken else {
+            throw OAuthError.tokenExchangeFailed("No refresh_token in response — remove prior access at https://myaccount.google.com/permissions and reconnect (Google only issues a refresh token on first consent).")
+        }
+
+        let email = try await fetchEmailAddress(accessToken: token.accessToken)
+        let expiresAt = Date().addingTimeInterval(TimeInterval(token.expiresIn))
+        return GmailAuthResult(email: email, accessToken: token.accessToken, refreshToken: refreshToken, expiresAt: expiresAt)
+    }
+
+    func refreshAccessToken(refreshToken: String) async throws -> (accessToken: String, expiresAt: Date) {
+        let params = [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": clientID,
+            "client_secret": clientSecret
+        ]
+        let token = try await postForm(params)
+        let expiresAt = Date().addingTimeInterval(TimeInterval(token.expiresIn))
+        return (token.accessToken, expiresAt)
+    }
+
+    private func postForm(_ params: [String: String]) async throws -> GoogleTokenResponse {
+        var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Self.formEncode(params)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw OAuthError.tokenExchangeFailed(String(data: data, encoding: .utf8) ?? "unknown error")
+        }
+        return try JSONDecoder().decode(GoogleTokenResponse.self, from: data)
+    }
+
+    private func fetchEmailAddress(accessToken: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw OAuthError.profileFetchFailed
+        }
+        struct Profile: Codable { let emailAddress: String }
+        guard let profile = try? JSONDecoder().decode(Profile.self, from: data) else {
+            throw OAuthError.profileFetchFailed
+        }
+        return profile.emailAddress
+    }
+
+    static func randomCodeVerifier() -> String {
+        var bytes = [UInt8](repeating: 0, count: 64)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return base64URLEncode(Data(bytes))
+    }
+
+    static func codeChallenge(for verifier: String) -> String {
+        let hash = SHA256.hash(data: Data(verifier.utf8))
+        return base64URLEncode(Data(hash))
+    }
+
+    static func base64URLEncode(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func formEncode(_ params: [String: String]) -> Data {
+        let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "+&="))
+        let pairs = params.map { key, value -> String in
+            let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+            let encodedValue = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+            return "\(encodedKey)=\(encodedValue)"
+        }
+        return Data(pairs.joined(separator: "&").utf8)
+    }
+}

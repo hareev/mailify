@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:Mailify}",
+      "name": "Debug Mailify",
+      "target": "Mailify",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug Mailify"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:Mailify}",
+      "name": "Release Mailify",
+      "target": "Mailify",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release Mailify"
+    }
+  ]
+}

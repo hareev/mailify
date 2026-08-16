@@ -1,0 +1,8 @@
+.build/
+Mailify.app/
+.DS_Store
+
+# Contains a real Google OAuth client secret filled in locally — never
+# commit this. See SETUP-GMAIL.md for how to fill it back in on a fresh
+# clone (starts from placeholder YOUR_CLIENT_ID/YOUR_CLIENT_SECRET values).
+Sources/Mailify/Gmail/GmailOAuthManager.swift
