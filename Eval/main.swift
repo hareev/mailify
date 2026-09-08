@@ -205,14 +205,30 @@ check(
 )
 
 check(
-    "default SyncSettings is unfiltered with a 30-day window",
+    "default SyncSettings (sinceLastSync) with no previous sync falls back to the 30-day initial backfill",
     GmailProvider.buildQuery(since: nil, filter: SyncSettings()) == "newer_than:30d"
+)
+
+check(
+    "sinceLastSync uses the full elapsed time uncapped, unlike a fixed window",
+    // elapsed = 90 days, +1 rounding = 91d — a fixed window would clamp this,
+    // sinceLastSync (windowDays == 0) must not.
+    GmailProvider.buildQuery(since: Date().addingTimeInterval(-90 * 86400), filter: SyncSettings(windowDays: SyncSettings.sinceLastSync)) == "newer_than:91d"
+)
+
+check(
+    "sinceLastSync still narrows down for a recent incremental sync",
+    // elapsed = 2 days, +1 rounding = 3d
+    GmailProvider.buildQuery(since: Date().addingTimeInterval(-2 * 86400), filter: SyncSettings(windowDays: SyncSettings.sinceLastSync)) == "newer_than:3d"
 )
 
 check("periodic sync interval label: 15 -> 'Every 15 minutes'", SyncSettings.label(forIntervalMinutes: 15) == "Every 15 minutes")
 check("periodic sync interval label: 60 -> 'Every hour'", SyncSettings.label(forIntervalMinutes: 60) == "Every hour")
 check("periodic sync interval label: 480 -> 'Every 8 hours'", SyncSettings.label(forIntervalMinutes: 480) == "Every 8 hours")
 check("periodic sync interval label: 1440 -> 'Every 24 hours'", SyncSettings.label(forIntervalMinutes: 1440) == "Every 24 hours")
+
+check("sync window label: sinceLastSync -> 'Since last sync'", SyncSettings.label(forWindowDays: SyncSettings.sinceLastSync) == "Since last sync")
+check("sync window label: 7 -> 'Last 7 days'", SyncSettings.label(forWindowDays: 7) == "Last 7 days")
 
 // MARK: - 3. OAuth authorize URL + PKCE — GmailOAuthManager
 

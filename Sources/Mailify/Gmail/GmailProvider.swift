@@ -40,17 +40,31 @@ struct GmailProvider: MailProvider {
     // MARK: - Conversion helpers
 
     /// Combines the `newer_than:Xd` date bound with optional inbox-tab
-    /// category exclusions. `filter.windowDays` is always the ceiling: on the
-    /// initial backfill (`since == nil`) it's used directly; on incremental
-    /// syncs the elapsed-since-last-sync window is used *unless* it's wider
-    /// than `windowDays`, in which case it's clamped. Without this clamp,
-    /// once an account had synced even once, changing the History picker
-    /// would silently stop doing anything — every later sync computes its
-    /// own (usually much smaller) elapsed window and would just ignore the
+    /// category exclusions.
+    ///
+    /// `filter.windowDays == SyncSettings.sinceLastSync` (the default) means
+    /// "no fixed ceiling": use exactly whatever's elapsed since `since`
+    /// (the account's last successful sync), or `initialBackfillDefaultDays`
+    /// when there's no previous sync yet (`since == nil`, a brand-new
+    /// account's first backfill).
+    ///
+    /// Otherwise `filter.windowDays` is a fixed ceiling: on the initial
+    /// backfill (`since == nil`) it's used directly; on incremental syncs the
+    /// elapsed-since-last-sync window is used *unless* it's wider than
+    /// `windowDays`, in which case it's clamped. Without this clamp, once an
+    /// account had synced even once, changing the History picker would
+    /// silently stop doing anything — every later sync computes its own
+    /// (usually much smaller) elapsed window and would just ignore the
     /// user's setting.
     static func buildQuery(since: Date?, filter: SyncSettings) -> String {
-        let elapsedDays = since.map { max(1, Int(Date().timeIntervalSince($0) / 86400) + 1) } ?? filter.windowDays
-        let days = min(elapsedDays, filter.windowDays)
+        let elapsedDays = since.map { max(1, Int(Date().timeIntervalSince($0) / 86400) + 1) }
+
+        let days: Int
+        if filter.windowDays == SyncSettings.sinceLastSync {
+            days = elapsedDays ?? SyncSettings.initialBackfillDefaultDays
+        } else {
+            days = min(elapsedDays ?? filter.windowDays, filter.windowDays)
+        }
 
         var clauses = ["newer_than:\(days)d"]
         if filter.excludeSocial { clauses.append("-category:social") }

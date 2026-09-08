@@ -94,14 +94,14 @@ private struct SyncSettingsView: View {
             Section {
                 Picker("Sync window", selection: windowDaysBinding) {
                     ForEach(SyncSettings.availableWindowDays, id: \.self) { days in
-                        Text("Last \(days) days").tag(days)
+                        Text(SyncSettings.label(forWindowDays: days)).tag(days)
                     }
                 }
                 .pickerStyle(.segmented)
             } header: {
                 Text("History")
             } footer: {
-                Text("How far back to pull mail the first time an account syncs. Doesn't affect already-synced mail or change how much history later incremental syncs re-check.")
+                Text("\"Since last sync\" (default) pulls only what's arrived since the last successful sync, with no fixed cap — falling back to the last 30 days for a brand-new account's first sync. The fixed options cap every sync, including incremental ones, to that many days back.")
             }
 
             Section {
